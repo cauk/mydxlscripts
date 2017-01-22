@@ -1,0 +1,637 @@
+/**
+ * Created by: inakiran
+ * Creation date: May 1, 2016
+ * DXL Editor is provided by SODIUS (www.sodius.com)
+ */
+ /*-----------------------------------------------------------------------------------------------------------------------
+*   DXL Name:  CEE_RELEASE_1.dxl
+*   Header for DOORS DXL
+*   (c) copyright <2016>
+*   Company      Harman/Becker Automotive Systems GmbH
+*   All rights reserved
+*   Secrecy Level STRICTLY CONFIDENTIAL																*/
+ 
+ /*-------------------------------------------------------------------------------------------------------------------------
+*Description
+	This DXL script allows users to efficiently use the existing Enhanced Export To Excel DXL tool used for exporting 
+	any DOORS Formal Module Views to Microsoft Excel Workbook. The script developed below allows to export 
+	multiple user selected views from multiple formal modules under current folder. This script eliminates the need
+	to run the Enhanced Export To Excel DXL tool for each view in order to create and export a view along with OLE 
+	objects to a excel workbook.
+	
+*Pre-requisites
+	In order for this script to be able to provide above described functionality, users should extract the 
+	Enhanced Export To Excel.dxl which is provided within the archive in which this script was delivered.
+	DOORS Client users should include the path in to which it was restored. Only the path to the accompanying 
+	Enhanced Export To Excel.dxl script is necessary.
+	
+*Execution Procedure
+	The archive also includes a PPT file "Instructions to run the script.pptx" which contains configuration procedure
+	for running the tool. 
+	Once the script is run, the dialog box includes a text box which will further guide the users.
+--------------------------------------------------------------------------------------------------------------------------*/
+ 
+ 
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//
+// Pragmas
+//
+
+pragma encoding, "UTF-8"
+pragma runLim,0   // sets the time-out interval : The time-out is suppressed if zero.
+pragma stack, 100000000 //Sets the stack large enough so it will not fail in most cases.
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//
+// Global Constants
+//
+
+const string str_logfile = "C:\\Users\\inakiran\\Documents\\CEE LOG\\CEE LOG.txt"
+const int modListWidth = 300		//Propogates dialog box width, height changes
+const int modWidth = 200
+const int listLength = 15
+const string USER_HELP_TEXT = "
+	The first list on the left is the list of formal modules available under the selected folder in the DOORS Database.
+	The second list from left separated using a splitter is placeholder for all views in selected module.
+	The third list from the left is the list containing views required to export to excel.
+	To start select any module from the list to enable the Fetch Views button. Use this button to list all views available excluding Standard View in the selected module.
+	After selecting the view use the button Add to Export --> to add the selected view.
+	In order to remove a view after it is added to the Export List double-click on any view. "
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//
+// Global Variables
+//
+
+DB TheMainDB 		//The main dialog box handle
+DB tmpDB	//The dialog box that overrides the Message Box functions 
+DBE formalModFrameDBE,viewFrameDBE, exportListFrameDBE // The frame DBE that holds the lists
+DBE split1DBE, split2DBE // Splitters that allow resizing
+DBE getModulesBTN, addSelViewsBTN, fetchViewsBTN	//  Buttons to fill the lists 
+DBE NoteBox
+Skip skip_list=create	
+int skip_no = 0
+Skip concModView = create		// The skip list that holds the Concatenated Names of Module and views selected
+
+/*************************************************Initiatilization of Lists****************************************************/
+DBE ListOfModulesDBE
+Skip ModInFolders = create
+int NumOfModInFolders = 0
+
+DBE ListOfViewsDBE
+Skip ViewsInModule = create
+int NumOfViewsInModule = 0
+
+DBE ListOfSelViewsDBE
+Skip ViewsToExport = create
+int NumOfViewsToExport = 0
+
+/******************************************End of List Element Initializations*********************************************/
+
+
+Buffer fullModNameBuf =create 
+Buffer viewNameBuf = create
+Buffer concatenatedBuffer = create
+Buffer exportBuffer = create
+Skip buffer_skip = create
+int buffer_skip_key =0
+Skip export_list = create
+int exportIndex = 0
+int callcount =0
+bool chkView
+
+Folder FCurr
+Module mod // Global module handle used in different functions
+Trigger t	// Unused
+ 
+string selected_item
+string fullModName	// Contains the full module name from the nearest ancestor project or database root
+string dummy[ ]
+string extractedModName, extractedViewName // Strings that are passed to Enhanced Export To Excel as module name and --
+													//view name
+
+/******************************PATH TO THE MODIFIED EEE SCRIPT*****************************************************/
+#include "C:\\Users\\inakiran\\Documents\\sodiusWS2\\CEE_VER_1\\Enhanced Export to Excel Working.dxl"
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//
+// Subroutines
+//
+/**************************************************************************************************************************/
+
+/*
+
+if (!canOpenFile(str_logfile, true))
+{	
+	print str_logfile "/n"
+	print "Unable to write to target logfile."
+	halt
+} 
+Stream 	clog = write str_logfile // open the output log file stream
+*/
+/*
+****************************************************************************************************************
+*  Subroutine		:FILEWrite
+*  Description	:Write a string to the output File without a newline.
+*  Parameters	:string message = message to be written
+*						:stream ouptut_file
+*  Return			:NONE
+****************************************************************************************************************
+*/
+/*
+void LogWrite(string message, Stream ouptut_file)
+{
+	ouptut_file << message
+
+} // end FILEWrite
+*/
+/*
+************************************************************************************************************************
+*  Subroutine	:LogWriteLine
+*  Description	:Output a string to the desired output.  Currently using print statements.
+*  Parameters	:string inStr = the string that should be output
+*  Return		:NONE
+************************************************************************************************************************
+*/
+/*
+void LogWriteLine(string inStr)
+{
+	string message = ""
+	message = inStr 
+	LogWrite (message, str_logfile)
+} //LogWriteLine
+*/
+/*
+****************************************************************************************************************
+*  Subroutine	: closeOpenModules
+*  Description	: This routine closes all open modules in current folder
+*  Parameters	:  Full Name of module, Name of the view
+****************************************************************************************************************
+*/
+bool closeOpenModules(Folder F)
+{
+	bool res
+	Module openMod
+	for openMod in F do
+	{
+		close openMod
+		print "Closing open modules" "\n"
+	}
+	return true
+}
+/*
+****************************************************************************************************************
+*  Subroutine	: clearsListsInDB
+*  Description	: This routine clears all elements from a list DBE 
+*  Parameters	:  Full Name of module, Name of the view
+****************************************************************************************************************
+*/
+bool clearsListsInDB(DBE lstdbe)
+{
+	int numOfElementsInListDBE = noElems(lstdbe)
+	if(numOfElementsInListDBE>0)
+	{
+		empty lstdbe
+		return true
+	}
+	return false
+}
+
+/*
+****************************************************************************************************************
+*  Subroutine	: callEnhExcel
+*  Description	: This routine opens the the module and loads view that is required to write to excel. 
+				: It also calls the main export routine that performs export
+*  Parameters	:  Full Name of module, Name of the view
+****************************************************************************************************************
+*/
+
+void callEnhExcel(string m1, string v1)
+{
+	Module  mExport				/* 	Module handle used to open module using its full name	*/
+	mExport = read(m1,true)
+	View vCurr = view(v1)		/*	View handle used to load the view to export	*/
+	load view v1
+	
+	void warningBox (string s) 	/* 	Overrides interactive message box functions in the included file	*/
+	{
+		print "Warning: " s "\n" 
+	}	
+	bool confirm (string s)			/*	Overrides interactive message box functions in the included file	*/ 
+	{
+		print "Confirmed: " s "\n"; return true 
+	}
+	void ack (string s)				/*	Overrides interactive message box functions in the included file	*/ 
+	{
+		print "Acknowledge: " s "\n" 
+	}
+	void acknowledge (string s)	/*	Overrides interactive message box functions in the included file	*/ 
+	{
+		print "Acknowledge: " s  "\n"  
+	}
+	void infoBox (string s)			/*	Overrides interactive message box functions in the included file	*/ 
+	{
+		print "Info: " s "\n"
+	}
+	void info (string s)				/* 	Overrides interactive message box functions in the included file	*/ 
+	{
+		print "Info: " s "\n" 
+	}																			
+	tmpDB = null					/* 	Override the main dialog box in the included file					*/
+	
+	void show  (DB x) { realize x; tmpDB = x }
+	void block (DB x) { realize x; tmpDB = x }
+	
+	exportPreChecks(mExport)
+	makeExcelExportUI(mExport)
+	hide excelExportDB
+	exportModuleToExcel(excelExportDB)	
+
+}	// end of callEnhExcel
+/***********************************************************************************************************************/
+
+/***********************************************************************************************************************/
+void onExportViewSelection(DBE ZZ)
+{
+	//Dummy can be used in future to pop-up details
+	ZZ=null
+}
+ /*****************************************************************************************************************************/
+
+/*
+****************************************************************************************************************
+*  Subroutine	: onExportViewActivation
+*  Description	: This routine removes any added view from the export list on double clicking on the view name
+*  Parameters	: Takes any DBE list element
+****************************************************************************************************************
+*/
+
+void onExportViewActivation(DBE YY)
+{
+	int selView = get(ListOfSelViewsDBE)
+	print selView "\n"
+	delete(ListOfSelViewsDBE,selView)
+	delete(ViewsToExport,selView)
+	if(find(buffer_skip,selView))
+		delete(buffer_skip,selView)
+		//ack "delete succeeded"
+
+}
+/*
+****************************************************************************************************************
+*  Subroutine	: createExportBuff
+*  Description	: This routine is invoked as a sub-routine to the add view to export button. This function is 
+				: responsible for associating a view with its module allowing export of multiple views from 
+				: multiple formal modules. It adds # character between module name and view name and 
+				: returns the concatenated buffer to calling function for adding to a skip list of BUFFER datatype.
+*  Parameters	: None
+*  Returns		: Concatenated buffer with CHAR # added as between module and view names
+****************************************************************************************************************
+*/
+
+Buffer createExportBuff()
+{
+	char marker = '#'
+	fullModNameBuf = getBuffer(ListOfModulesDBE)
+	viewNameBuf = getBuffer(ListOfViewsDBE)
+	fullModNameBuf= fullModNameBuf "#"
+	concatenatedBuffer = fullModNameBuf
+	concatenatedBuffer += viewNameBuf
+	return concatenatedBuffer
+}
+ /*
+********************************************************************************************************************************************
+*  Subroutine	: OnActivateOfMod
+*  Description	: TBD
+*  Parameters	: list element
+********************************************************************************************************************************************
+*/
+
+void OnActivateOfMod(DBE lst)
+{
+	//a dummy place holder for future enhancements
+	
+}
+ 
+/*
+********************************************************************************************************************************************
+*  Subroutine	: checkViews
+*  Description	:  This routines checks for existence of custom views other than standard views
+*  Parameters	: Module handle
+********************************************************************************************************************************************
+*/
+
+bool checkViews(Module mod_name)
+{
+	string vn
+	bool objsNull
+	int countOfViews = 0
+	for vn in views mod_name  do
+	{ 
+		countOfViews++
+	}
+	if(countOfViews==0)
+	{
+		return false
+	}
+	else { return true}
+}
+/*
+********************************************************************************************************************************************
+*  Subroutine	: fillViewsList
+*  Description	: This routines populates the list that holds the views
+*  Parameters	: Module handle
+********************************************************************************************************************************************
+*/
+
+void fillViewsList(Module m)
+{
+	string view_names
+	int listIndex = 0
+	int listEleCount = noElems( ListOfViewsDBE)
+	print "The number of elements in ListOfViewsDBE :"listEleCount "\n"
+	if(listEleCount>0)
+	{
+		empty ListOfViewsDBE	/*	Clears the list before filling with views from selected module	*/
+		
+	}
+	for view_names in views m do
+	{								/*	Insert the view names as strings in to list element	*/
+		insert(ListOfViewsDBE,listIndex++,view_names)
+	}
+	close m
+}
+/*
+********************************************************************************************************************************************
+*  Subroutine	: fetchViews
+*  Description	: This routines is a callback to button "Fetch Views".  This routine provides the functionality of listing view names from the
+				: selected module in the "List of Modules" DBE. Also generates a warning message in case of no custome views present.
+*  Parameters	: Module handle
+********************************************************************************************************************************************
+*/
+
+void fetchViews(DBE lst)
+{
+	string selectedModule = null
+	selectedModule = get(ListOfModulesDBE)
+	int selIndex =0
+	 selIndex= get(ListOfModulesDBE)
+	ModName_ selModRef = module(selectedModule)
+	
+	fullModName = fullName(selModRef)
+	Module modSelected = read(fullModName,true)
+	
+	bool check1 = checkViews(modSelected)
+	if(check1 ==false)
+	{
+		warningBox "The selected module has only standard view"
+		set(ListOfModulesDBE, selIndex, false)
+	}
+	
+	fillViewsList(modSelected)
+	
+}
+
+/*
+********************************************************************************************************************************************
+*  Subroutine	: OnDeselectionOfMod
+*  Description	: Activate Fetch Views button
+*  Parameters	: list element
+********************************************************************************************************************************************
+*/
+
+ OnDeselectionOfMod
+ {
+	inactive fetchViewsBTN
+		
+}
+/*
+********************************************************************************************************************************************
+*  Subroutine	: OnSelectionOfMod
+*  Description	: Activate Fetch Views button
+*  Parameters	: list element
+********************************************************************************************************************************************
+*/
+void OnSelectionOfMod(DBE lst)
+{
+	active fetchViewsBTN
+		
+}
+
+/*
+********************************************************************************************************************************************
+*  Subroutine	: allItemsInFolders(Folder F)
+*  Description	:  This routine fills the list for modules from selected folder	
+*  Parameters	:  The folder selected by the user
+********************************************************************************************************************************************
+*/
+void allItemsInFolders(Folder f)
+{
+	Module mod = null;
+	Item i;
+	
+	if(null == f)
+	    return;
+	    
+	for i in f do
+	{
+	    if(type(i) == "Folder")
+	        allItemsInFolders(folder(i));	/* Recursive call to the parent function */
+	    else if(type(i) == "Formal")
+	    {
+	    		mod = read(fullName(i), false);
+	    		mod_name = name(mod)
+	    		string modnamefull = fullName(i)
+	    		realize parentOf(ListOfModulesDBE)	/*	Allows to pre-fill the list of module names within a folder	*/
+	        	insert(ListOfModulesDBE,NumOfModInFolders++,modnamefull)
+	     }
+	}
+}
+/*
+********************************************************************************************************************************************
+*  Subroutine	: addViews(DBE  lst)
+*  Description	: This function is executed as a callback to button "Export to Excel". This performs the action of adding views to 
+				: the export list. It provides the capability of maintaining mapping between each selected view and its parent module. 
+*  Parameters	:  List DBE element
+********************************************************************************************************************************************
+*/
+void addViews(DBE lsx)
+{
+	selected_item = get(ListOfViewsDBE)
+	insert(ListOfSelViewsDBE,NumOfViewsToExport,selected_item)
+	exportBuffer = createExportBuff()	/* Call the function to concatenate module name and view name */
+	put(buffer_skip,buffer_skip_key,exportBuffer) 	/*	Skip list to store buffers containing the concatenated buffers*/
+	NumOfViewsToExport++
+	buffer_skip_key++
+	
+}
+
+/*************************************************************************************************************************/
+
+void startExport(DB XX)
+{
+	Module Mref
+	Buffer bExp = create
+	char ch='#'
+	int mark, buflen =0
+	int i =0
+	bool cls
+	int countOfEntries = noElems(ListOfSelViewsDBE)
+	print "the number of entries in buffer_skip :"countOfEntries "\n"
+	inactive exportToExcelBTN	/* restricts users from adding or removing any view once the export is started	*/ 
+	
+	for bExp  in buffer_skip do
+	{
+		print "The content of buffer_skip is: "bExp "\n"
+		mark = contains(bExp ,ch,0)
+		buflen = length(bExp )
+		extractedModName =  (string bExp [0:mark-1])	/*	Extract the full module name	*/
+		extractedViewName = (string bExp [mark+1:buflen-1])	/*	Extract the view name		*/
+		//print "The extractedViewName value is: " extractedViewName "\n"
+		//print "The extractedModName value is :" extractedModName "\n"
+		Item iExportRef
+		ModName_ modRef = module(extractedModName)
+		//print "The value of m1 is :" m1 "\n"
+			if(open(modRef))
+			{
+						
+				iExportRef = item(extractedModName)
+				Mref = module(iExportRef)
+				print  "is open" extractedModName "\n"
+				close Mref
+			}
+		callEnhExcel(extractedModName,extractedViewName)
+		i++
+	
+	}//end of for
+		//print "The total entries in buffer_skip  is  "i "\n"
+	
+}// end of startExport
+
+/*
+********************************************************************************************************************************************
+*  Subroutine	: constructMainDB( )
+*  Description	: this function constructs the main user interface window for the application 
+*  Parameters	: 
+********************************************************************************************************************************************
+*/
+void constructMainDB( )
+{
+	TheMainDB = topMost "Custom Enhanced Export To Excel"	
+
+	formalModFrameDBE = frame(TheMainDB, "Show Formal Modules", modListWidth + 20, listLength *15 + 60 )
+
+	formalModFrameDBE -> "right" -> "unattached"
+	formalModFrameDBE -> "bottom" -> "unattached"
+
+	ListOfModulesDBE = listView(TheMainDB,"List Of Modules", modListWidth+150, listLength, dummy)
+
+	ListOfModulesDBE	 ->		"top"		->		"inside"	->		formalModFrameDBE
+	ListOfModulesDBE	 -> 	"left" 		->	 	"inside" 	->		formalModFrameDBE
+	ListOfModulesDBE	 -> 	"right"		-> 		"inside" 	->		formalModFrameDBE
+
+	set(ListOfModulesDBE,OnSelectionOfMod,OnDeselectionOfMod,OnActivateOfMod)
+
+	viewFrameDBE = frame(TheMainDB, "Show Available Views",modWidth + 20, listLength * 15 + 60  )	
+
+	viewFrameDBE 	->	 	"top" 		->		 "aligned"		->		formalModFrameDBE
+	viewFrameDBE		->	 	"bottom" 	->		 "unattached"		
+
+	ListOfViewsDBE= list(TheMainDB,"List Of Views", listLength, dummy )
+
+	ListOfViewsDBE 	->		"top"			->		"inside"		->		viewFrameDBE
+	ListOfViewsDBE 	-> 		"left" 		->	 	"inside" 	->		viewFrameDBE
+	ListOfViewsDBE 	-> 		"right"		-> 		"inside" 	-> 		viewFrameDBE
+
+
+	getModulesBTN = apply(TheMainDB,"Get Modules",getModules)
+	getModulesBTN 		->	 "top"		->		"spaced"			->		ListOfModulesDBE	
+	getModulesBTN		->  "left"			-> 		"inside" 		->	 	formalModFrameDBE
+	getModulesBTN		->  "right" 		-> 		"inside" 		->	 	formalModFrameDBE
+
+
+	fetchViewsBTN = button(TheMainDB,"Fetch Views",fetchViews)
+
+	fetchViewsBTN 		->	"top"				 -> 	"spaced"		 -> 	ListOfViewsDBE
+	fetchViewsBTN		->  "left" 			-> 		"inside" 	->	 	viewFrameDBE
+	fetchViewsBTN		->  "right" 			-> 		"inside" 	->	 	viewFrameDBE
+	fetchViewsBTN		->  "bottom" 		-> 		"inside" 	->	 	viewFrameDBE		
+
+
+	addSelViewsBTN = button(TheMainDB,"    Add to Export-->  ",addViews)
+
+	addSelViewsBTN 	->	"top"				 -> 	"aligned"		 -> 	fetchViewsBTN
+	addSelViewsBTN		->  "left" 			-> 		"spaced" 	->	 	fetchViewsBTN
+	addSelViewsBTN		->  "right" 			-> 		"inside" 	->	 	 viewFrameDBE
+	addSelViewsBTN		->  "bottom" 		-> 		"inside" 	->	 	viewFrameDBE
+
+	exportListFrameDBE = frame(TheMainDB, "List of Views to export to excel", modWidth + 60, listLength * 15 + 60)
+	exportListFrameDBE	->		"top"		->		"aligned"	-> 	viewFrameDBE
+	
+
+	ListOfSelViewsDBE = list(TheMainDB,"Selected Views",listLength,dummy)
+
+	ListOfSelViewsDBE -> "top" -> "inside" -> exportListFrameDBE
+	ListOfSelViewsDBE -> "left" -> "inside" -> exportListFrameDBE
+	ListOfSelViewsDBE -> "right" -> "inside" -> exportListFrameDBE
+	ListOfSelViewsDBE -> "bottom" -> "inside" -> exportListFrameDBE
+
+	set(ListOfSelViewsDBE, onExportViewSelection, onExportViewActivation)
+
+	split1DBE = splitter(TheMainDB, formalModFrameDBE, viewFrameDBE, 3)
+	split1DBE 				-> 	"top" 			->		"form"
+	split1DBE 				-> "left"				->		 "unattached"
+	split1DBE 				-> "right" 			->		"unattached"
+	split1DBE				-> "bottom" 		-> 		"form"
+
+	split2DBE = splitter(TheMainDB, viewFrameDBE, exportListFrameDBE, 3)
+	split2DBE -> "top" -> "form"
+	split2DBE -> "left" -> "unattached"
+	split2DBE -> "right" -> "unattached"
+	split2DBE -> "bottom" -> "form"
+
+	NoteBox =richText (TheMainDB, "NOTE : ",USER_HELP_TEXT,800,150,true )
+	NoteBox -> "top" -> "spaced" -> formalModFrameDBE
+	NoteBox -> "left" -> "form"
+	NoteBox -> "right" -> "form"
+	NoteBox -> "bottom" -> "form"
+	
+	apply(TheMainDB,"Export to Excel",startExport)
+
+	inactive fetchViewsBTN
+	realize TheMainDB
+     
+}
+
+/*
+********************************************************************************************************************************************
+*  Subroutine	: 		MAIN
+*  Description	: 
+*  Parameters	: Selection of a folder in DOORS explorer
+********************************************************************************************************************************************
+*/
+
+Item i = getSelectedItem()	/*	Get the selection made in Database explorer window	*/
+
+if(type(i)!="Folder" )
+{
+	infoBox " This script requires user to select a folder on the left handside of the database explorer"
+	   		 
+}
+else
+{
+	int UserQueryAns = 0
+	string UserButtons[ ] = {"Proceed","Cancel"}
+	UserQueryAns = query("Proceed with execution",UserButtons)
+	if(UserQueryAns==0)then
+	{
+		SelFolderName = name(i)
+		FCurr= folder(i)
+		constructMainDB( )
+		allItemsInFolders(FCurr)
+		show TheMainDB
+	}else { halt }
+}
+
+/********************************END OF SCRIPT*****************************************************/
